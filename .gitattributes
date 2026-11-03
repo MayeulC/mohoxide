@@ -1,0 +1,7 @@
+# LF everywhere: golden files and Lua sources must be byte-identical on every
+# platform (a CRLF checkout on Windows failed the golden test).
+* text=auto eol=lf
+
+# Binary assets (the audit map in tests/vault)
+*.scmap binary
+*.dds binary

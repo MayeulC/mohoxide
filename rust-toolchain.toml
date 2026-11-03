@@ -1,0 +1,6 @@
+[toolchain]
+# Pinned: every machine (and every lockstep peer) builds with the same
+# compiler. A floating `nightly` drifted between Mac and Windows and broke
+# the Windows build. Bump deliberately, on all machines at once.
+channel = "nightly-2026-10-29"
+components = ["rust-src", "clippy"]

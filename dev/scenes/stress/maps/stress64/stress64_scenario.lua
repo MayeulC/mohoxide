@@ -1,0 +1,23 @@
+version = 3
+-- Perf stress map (docs/guides/running.md, "Stress maps"): Frostmill Ruins (81 km)
+-- with 64 start spots on an 8 x 8 grid, free-for-all.
+ScenarioInfo = {
+    name = 'Stress 64 (Frostmill Ruins)',
+    description = 'Engine stress test: 64 armies.',
+    type = 'skirmish',
+    starts = true,
+    preview = '',
+    size = {4096, 4096},
+    map = '/maps/SCMP_030/SCMP_030.scmap',
+    save = '/maps/stress64/stress64_save.lua',
+    script = '/maps/SCMP_030/SCMP_030_script.lua',
+    norushradius = 0,
+    Configurations = {
+        ['standard'] = {
+            teams = {
+                { name = 'FFA', armies = {'ARMY_1','ARMY_2','ARMY_3','ARMY_4','ARMY_5','ARMY_6','ARMY_7','ARMY_8','ARMY_9','ARMY_10','ARMY_11','ARMY_12','ARMY_13','ARMY_14','ARMY_15','ARMY_16','ARMY_17','ARMY_18','ARMY_19','ARMY_20','ARMY_21','ARMY_22','ARMY_23','ARMY_24','ARMY_25','ARMY_26','ARMY_27','ARMY_28','ARMY_29','ARMY_30','ARMY_31','ARMY_32','ARMY_33','ARMY_34','ARMY_35','ARMY_36','ARMY_37','ARMY_38','ARMY_39','ARMY_40','ARMY_41','ARMY_42','ARMY_43','ARMY_44','ARMY_45','ARMY_46','ARMY_47','ARMY_48','ARMY_49','ARMY_50','ARMY_51','ARMY_52','ARMY_53','ARMY_54','ARMY_55','ARMY_56','ARMY_57','ARMY_58','ARMY_59','ARMY_60','ARMY_61','ARMY_62','ARMY_63','ARMY_64'} },
+            },
+            customprops = {},
+        },
+    },
+}

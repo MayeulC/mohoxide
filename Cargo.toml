@@ -1,0 +1,225 @@
+cargo-features = ["codegen-backend"]
+
+[package]
+name = "rts-core-engine"
+version = "0.1.0"
+edition = "2024"
+# Never published to crates.io (cargo-about then leaves it out of the
+# third-party notices).
+publish = false
+
+# The engine is the root package; our helper crates live in `crates/`
+# (`vendor/` is third-party code). `cargo build` / `run` at the root still
+# build the engine only; `--workspace` covers the helpers too.
+[workspace]
+members = [".", "crates/*"]
+
+# Clippy for every workspace crate (each opts in with `[lints] workspace = true`).
+# CI denies warnings (docs/guides/testing.md "Clippy"). Allowed: lints that
+# fight the code's shape rather than catch mistakes. Sim state and render
+# passes take many arguments and nest generic types, and the large enum
+# variants are orders and snapshots moved rarely enough not to box. Indexed
+# loops over parallel arrays read better than zipped iterators, and
+# `chunks_exact(4)` better than `as_chunks::<4>().0.iter()`. Doc comments
+# are prose; a line after a list item is not a rendering bug worth chasing.
+[workspace.lints.clippy]
+too_many_arguments = "allow"
+type_complexity = "allow"
+large_enum_variant = "allow"
+len_without_is_empty = "allow"
+new_without_default = "allow"
+needless_range_loop = "allow"
+chunks_exact_to_as_chunks = "allow"
+doc_lazy_continuation = "allow"
+# The determinism bans in clippy.toml: on only for the sim and its Lua API.
+disallowed_methods = "allow"
+disallowed_types = "allow"
+
+[lints]
+workspace = true
+
+# Iterate in dev. Our crate at opt-level 1: incremental rebuilds stay ~1-2 s
+# and the sim runs ~2.5x faster than at 0 (3000 AI ticks: 5.4 s vs 13.6 s),
+# still debuggable. Dependencies (the Luau VM, full_moon, ...) fully
+# optimised: roughly halves dev startup.
+[profile.dev]
+opt-level = 1
+# line-tables-only rebuilds our lib about 1 s faster (5.6-6.3 s -> 4.6-5.1 s)
+# but loses lldb locals on our crate. Uncomment to adopt:
+# debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 3
+# Dependencies don't need debug info in dev (debugging happens in our crate);
+# compiling and linking ~630 units of it costs real time and disk. Line
+# numbers in dep backtraces go away; function names survive.
+debug = "none"
+
+# `cargo test` builds under `test` (CI's nextest too): our crate fully
+# optimised only there — the compute-bound suites (weapon_audit's 641-case
+# census, scenarios' sim ticks) are sim work, and the dev-iterate profile
+# above stays untouched for non-test builds. The sim is fixed-point, so the
+# optimisation level can't change its results; the gate's goldens verify that
+# every run (docs/guides/testing.md). Line-table debug info keeps the extra compile
+# cheap and is enough for backtraces.
+[profile.test]
+inherits = "dev"
+opt-level = 3
+debug = "line-tables-only"
+
+[profile.dev-cranelift]
+inherits = "dev"
+codegen-backend = "cranelift"
+
+[profile.dev-cranelift.package."*"]
+codegen-backend = "llvm"
+
+# Optimised build for long runs, benches and profiling. No LTO and
+# incremental: a rebuild after one edit takes ~1-2 s instead of 20-27 s with
+# thin LTO, at the same runtime (20-min headless AI game: 16.2 s either way;
+# the dependencies are optimised regardless). Line tables are enough for
+# Tracy and backtraces.
+[profile.release]
+opt-level = 3
+lto = false
+incremental = true
+debug = "line-tables-only"
+
+# Fastest runtime at any compile cost: `cargo build --profile dist`
+# (binary in target/dist/). These settings matched the old fat-LTO
+# build's runtime (10 paired 3000-tick fights, bit-identical sim state;
+# dev/build-speed/measure-*.sh re-runs the comparison). codegen-units = 1
+# is the runtime knob: 16 on our crate cost ~4%, and 16 on deps built slower.
+[profile.dist]
+inherits = "release"
+lto = "thin"
+codegen-units = 1
+incremental = false
+# What players get (dev/package): no symbols or line tables, and no paths
+# from the build machine (home folder, user name) left in the binary.
+debug = false
+strip = true
+trim-paths = "all"
+
+[features]
+tracy = ["dep:tracing-tracy", "dep:tracy-client", "dep:tracy-client-sys", "dep:profiling", "profiling/profile-with-tracy"]
+# Tracy zone per Lua thread resume, named by the forked function (a lookup
+# per ForkThread and per thread resume, so separate from `tracy`).
+lua-profile = ["tracy"]
+
+[dependencies]
+serde = { version = "1", features = ["derive", "rc"] }
+postcard = { version = "1", features = ["alloc"] }
+ab_glyph = "0.2"
+mlua = { version = "0.10", features = ["luau"] }
+# The typed Lua API's macros (src/lua_api).
+lua-api-macros = { path = "crates/lua-api-macros" }
+# Static declarations collected at link time: `callbacks!` blocks and
+# `LuaTable`/`LuaEnum` types register themselves for the generated types.
+inventory = "0.3"
+
+winit = "0.30"
+egui = "0.34"
+egui-wgpu = { version = "0.34", default-features = false }
+egui-winit = "0.34"
+egui_tracing = "0.3"
+egui_ltreeview = "0.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+# Profiling (`--features tracy`): spans and frame marks to the Tracy GUI.
+# Pinned to the Tracy 0.13.1 protocol (Homebrew's `tracy`); the GUI and the
+# client must match (table in tracy-client-sys's README).
+tracing-tracy = { version = "=0.11.4", optional = true }
+tracy-client = { version = "=0.18.4", optional = true }
+tracy-client-sys = { version = "=0.28.0", optional = true }
+# wgpu's own scopes (command processing at submit, passes) in the same trace.
+profiling = { version = "1.0", optional = true }
+pollster = "0.4"
+zip = "8"
+# `.zst` files in folder mounts (the audit map in tests/vault); zip already uses it
+zstd = { version = "0.13", features = ["zstdmt"] }
+rayon = "1.12"
+memmap2 = "0.9.10"
+miette = { version = "7.6.0", features = ["fancy"] }
+lazy-regex = { version = "3.6.0", features = ["std", "perf", "perf-cache", "perf-dfa", "perf-inline", "perf-literal"] }
+thiserror = "2.0.18"
+walkdir = "2.5.0"
+bitflags = { version = "2", features = ["serde"] }
+full_moon = { version = "2.2.0", features = ["lua53", "luau"] }
+globset = "0.4.18"
+fixed = { version = "1", features = ["serde"] }
+# Deterministic sin/pow/log/... for Luau (src/engine/lua/det_math.rs).
+libm = "0.2"
+xxhash-rust = { version = "0.8.19", features = ["xxh3"] }
+glam = { version = "0.33", features = ["bytemuck"] }
+bytemuck = { version = "1.25.2", features = ["derive"] }
+png = "0.18.1"
+clap = { version = "4.6.1", features = ["derive"] }
+texpresso = { version = "2.0.2", features = ["rayon"] }
+# Process memory (the status bar, Tracy plots).
+memory-stats = "1.2.0"
+# LAN / direct-connect multiplayer (src/net): our own reliable, ordered
+# channel over plain UDP (acks + resends), one network thread, no TLS and no
+# async runtime. LAN discovery needs a broadcast socket several local
+# clients can share:
+socket2 = { version = "0.6", features = ["all"] }
+# Each interface's subnet broadcast address (LAN discovery beacons).
+if-addrs = "0.15"
+cpal = "0.18.2"
+rtrb = "0.4.0"
+iroh = "1.3"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+# Downloading a host's map from FAF's vault in the lobby (src/net/map_download.rs).
+# Already built for iroh: the same features, and ring for TLS as iroh uses.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+bytes = "1"
+data-encoding = "2"
+# Text-only clipboard (paste/copy in the UI); default features would pull
+# `image` (tiff, zune-jpeg, ...) for clipboard screenshots nothing uses.
+# `wayland-data-control`: copy on Wayland compositors with that protocol
+# (sway, KDE) natively rather than through XWayland.
+arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
+# The "where is the game?" folder picker when the install isn't found
+# (src/install.rs).
+rfd = "0.17"
+# The machine a log came from (OS, CPU, memory: src/diagnostics.rs).
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+wgpu = { version = "29", default-features = false, features = ["std", "metal", "wgsl", "parking_lot"] }
+# The GPU memory in use (MTLDevice.currentAllocatedSize, the status bar);
+# the version wgpu-hal already uses.
+objc2-metal = { version = "0.3.2", default-features = false, features = ["std", "MTLDevice"] }
+# Opting the windowed game out of App Nap (src/render/mod.rs).
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSProcessInfo", "NSString"] }
+
+[target.'cfg(unix)'.dependencies]
+# Thread QoS for the render workers (src/render/mod.rs, macOS); the terminal
+# width for the weapon audit's table (src/audit.rs).
+libc = "0.2"
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+# `counters`: wgpu's buffer / texture byte counts (GPU memory in the status bar).
+wgpu = { version = "29", default-features = false, features = ["std", "vulkan", "wgsl", "parking_lot", "counters"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Diagnostics_Debug", "Win32_System_Threading"] }
+
+# Luau with moho-compat VM patches (see vendor/luau0-src/MOHO_PATCHES.md).
+[patch.crates-io]
+luau0-src = { path = "vendor/luau0-src" }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "engine"
+harness = false
+
+[build-dependencies]
+# Shaders are WESL (`src/render/shaders/`), compiled to WGSL by `build.rs`.
+wesl = "0.6"
+# pl_mpeg (`vendor/pl_mpeg`): SupCom's movies.
+cc = "1"

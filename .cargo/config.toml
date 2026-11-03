@@ -1,0 +1,2 @@
+[alias]
+watch-cranelift = ["watch", "-e", "rs", "-x", "run --profile dev-cranelift"]

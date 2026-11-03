@@ -1,0 +1,14 @@
+// rust-analyzer checks into its own folder (target/rust-analyzer), so the
+// editor's background `cargo check` never holds the build lock on target/
+// while you build, run or test.
+{
+  "lsp": {
+    "rust-analyzer": {
+      "initialization_options": {
+        "cargo": {
+          "targetDir": true
+        }
+      }
+    }
+  }
+}

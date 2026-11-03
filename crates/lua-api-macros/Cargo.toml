@@ -1,0 +1,18 @@
+[package]
+name = "lua-api-macros"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Macros for the engine's typed Lua API (src/lua_api): registration, callbacks, typed tables and enums"
+
+[lints]
+workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full", "visit-mut"] }
+quote = "1"
+proc-macro2 = "1"
+heck = "0.5"

@@ -1,0 +1,135 @@
+# Builds the player downloads (dev/package) on Linux, macOS and Windows and
+# keeps them as workflow artifacts; a `v*` tag also publishes them as a
+# GitHub release. No game data is needed: the scripts only build and zip.
+# See docs/guides/packaging.md "Builds in CI and releases".
+name: Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to main cancels the build in progress; a tag build is never
+# cancelled.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  package:
+    name: package (${{ matrix.os }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            runner: ubuntu-24.04
+            archive: dist/*.tar.gz
+          # One leg: package-macos.sh builds a universal binary (Apple
+          # silicon + Intel, lipo) on the arm64 runner.
+          - os: macos
+            runner: macos-latest
+            archive: dist/*.zip
+          - os: windows
+            runner: windows-latest
+            archive: dist/*.zip
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # No build cache: a release is built from scratch, so a cache written by
+      # another ref can't end up in what players download.
+
+      # The pinned nightly from rust-toolchain.toml.
+      - name: Toolchain
+        run: rustup toolchain install
+
+      # cpal links ALSA (docs/guides/packaging.md).
+      - name: Linux packages
+        if: matrix.os == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libasound2-dev
+
+      - name: Package (Linux)
+        if: matrix.os == 'linux'
+        run: dev/package/package-linux.sh
+
+      - name: Package (macOS)
+        if: matrix.os == 'macos'
+        run: dev/package/package-macos.sh
+
+      - name: Package (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File dev\package\package-windows.ps1
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: rts-core-engine-${{ matrix.os }}
+          path: ${{ matrix.archive }}
+          if-no-files-found: error
+          retention-days: 30
+          # Already compressed.
+          compression-level: 0
+
+      # The Lua type files (Luau `.d.luau` + EmmyLua `.lua` per VM), from the
+      # binary just built: `--dump-api` needs no game files. Same on every
+      # OS, so only the Linux leg makes them. See docs/guides/lua-api-types.md.
+      - name: Lua API types
+        if: matrix.os == 'linux'
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          name="rts-core-engine-$version-$(git rev-parse --short HEAD)-lua-api"
+          target/package/dist/rts-core-engine --dump-api "lua-api/$name"
+          rm -f "lua-api/$name/undocumented.md"
+          (cd lua-api && zip -r "$name.zip" "$name")
+          ls -l "lua-api/$name"
+
+      - uses: actions/upload-artifact@v7
+        if: matrix.os == 'linux'
+        with:
+          name: rts-core-engine-lua-api
+          path: lua-api/*.zip
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      # A tag with a `-` in it (v0.2.0-rc1) is a prerelease.
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=()
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            prerelease=(--prerelease)
+          fi
+          ls -l dist
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag \
+            "${prerelease[@]}" \
+            dist/*

@@ -1,0 +1,54 @@
+# Determinism bans (docs/architecture/determinism.md). The lints are off
+# workspace-wide (Cargo.toml) and turned on for the sim and its Lua API
+# (`src/engine/sim/mod.rs`, `src/engine/api/mod.rs`), outside tests. A use
+# that can't leak into sim state takes an `#[allow]` saying why.
+
+disallowed-methods = [
+    # Platform libm: results differ between the Windows CRT and Apple's libm.
+    # Basic IEEE ops (+ - * / sqrt) are exact on both; these are not.
+    { path = "f64::sin", reason = "platform libm; use math::sin_cos on Fx" },
+    { path = "f64::cos", reason = "platform libm; use math::sin_cos on Fx" },
+    { path = "f64::sin_cos", reason = "platform libm; use math::sin_cos on Fx" },
+    { path = "f64::tan", reason = "platform libm" },
+    { path = "f64::asin", reason = "platform libm" },
+    { path = "f64::acos", reason = "platform libm" },
+    { path = "f64::atan", reason = "platform libm; use math::atan2 on Fx" },
+    { path = "f64::atan2", reason = "platform libm; use math::atan2 on Fx" },
+    { path = "f64::exp", reason = "platform libm" },
+    { path = "f64::exp2", reason = "platform libm" },
+    { path = "f64::ln", reason = "platform libm" },
+    { path = "f64::log", reason = "platform libm" },
+    { path = "f64::log2", reason = "platform libm" },
+    { path = "f64::log10", reason = "platform libm" },
+    { path = "f64::powf", reason = "platform libm" },
+    { path = "f64::powi", reason = "unspecified precision; multiply it out" },
+    { path = "f64::hypot", reason = "platform libm; use sqrt(x * x + y * y)" },
+    { path = "f64::cbrt", reason = "platform libm" },
+    { path = "f64::sinh", reason = "platform libm" },
+    { path = "f64::cosh", reason = "platform libm" },
+    { path = "f64::tanh", reason = "platform libm" },
+    { path = "f32::sin", reason = "platform libm; use math::sin_cos on Fx" },
+    { path = "f32::cos", reason = "platform libm; use math::sin_cos on Fx" },
+    { path = "f32::sin_cos", reason = "platform libm; use math::sin_cos on Fx" },
+    { path = "f32::tan", reason = "platform libm" },
+    { path = "f32::asin", reason = "platform libm" },
+    { path = "f32::acos", reason = "platform libm" },
+    { path = "f32::atan", reason = "platform libm; use math::atan2 on Fx" },
+    { path = "f32::atan2", reason = "platform libm; use math::atan2 on Fx" },
+    { path = "f32::exp", reason = "platform libm" },
+    { path = "f32::ln", reason = "platform libm" },
+    { path = "f32::powf", reason = "platform libm" },
+    { path = "f32::powi", reason = "unspecified precision; multiply it out" },
+    { path = "f32::hypot", reason = "platform libm" },
+    # Wall-clock time differs between peers.
+    { path = "std::time::Instant::now", reason = "wall clock; sim time is the tick" },
+    { path = "std::time::SystemTime::now", reason = "wall clock; sim time is the tick" },
+]
+
+disallowed-types = [
+    # hashbrown probes in SIMD groups whose width differs between SSE2 and
+    # NEON, so even a fixed hasher can iterate in a different order per
+    # platform. Lookups are fine; iterate a BTreeMap or sort first.
+    { path = "std::collections::HashMap", reason = "iteration order differs per platform; use BTreeMap, or #[allow] for lookup-only / sorted use" },
+    { path = "std::collections::HashSet", reason = "iteration order differs per platform; use BTreeSet, or #[allow] for lookup-only / sorted use" },
+]

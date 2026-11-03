@@ -1,0 +1,43 @@
+// Determinism: the clippy.toml bans (libm floats, wall clock, hash map
+// iteration) hold here outside tests; an #[allow] at a use says why it's safe.
+#![cfg_attr(not(test), warn(clippy::disallowed_methods, clippy::disallowed_types))]
+
+pub mod scheduler;
+pub mod rng;
+pub mod category;
+pub mod navigation;
+pub mod army;
+pub mod math;
+pub mod terrain;
+pub mod deposit;
+pub mod entity;
+pub mod presentation;
+pub mod platoon;
+pub mod layer;
+pub mod weapon;
+pub mod manipulator;
+pub mod intel;
+pub mod vision;
+pub mod tick;
+pub mod economy;
+pub mod unit_state;
+pub mod spatial;
+pub mod projectile;
+pub mod collision;
+pub mod checksum;
+pub mod threat;
+pub mod command;
+pub mod input;
+pub mod lua_data;
+pub mod pose;
+pub mod movement;
+pub mod avoidance;
+pub mod scroller;
+pub mod formation;
+pub mod gc;
+pub mod nav;
+pub mod hpa;
+pub mod flow;
+pub mod landing;
+pub mod bounded_props;
+pub mod carry;

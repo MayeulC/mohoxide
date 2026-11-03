@@ -1,0 +1,20 @@
+Third-party software in RTS Core Engine
+=======================================
+
+RTS Core Engine includes the open-source software below, each used under the
+licence named with it. The full licence texts follow, each with the crates
+that use it. The source of each Rust crate is published on crates.io under
+the name and version given.
+
+{{#each overview}}
+    {{{name}}}: {{count}} crate{{#if (gt count 1)}}s{{/if}}
+{{/each}}
+{{#each licenses}}
+
+------------------------------------------------------------------------------
+{{{name}}}
+Used by: {{#each used_by}}{{{crate.name}}} {{{crate.version}}}{{#unless @last}}, {{/unless}}{{/each}}
+------------------------------------------------------------------------------
+
+{{{text}}}
+{{/each}}

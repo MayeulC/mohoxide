@@ -1,0 +1,282 @@
+//! Moho thread globals on top of [`Scheduler`].
+
+use mlua::prelude::*;
+
+use crate::engine::sim::scheduler::{ResumeOutcome, Scheduler, TaskId};
+use crate::lua_api::{FnEntry, LuaArgs, Scope, Status, lua_fn};
+
+/// Profiling builds (`--features lua-profile`, which implies `tracy`): each
+/// Lua thread resume is a Tracy zone named by the function the thread was
+/// forked with (`file:line`), inside the `LuaThreads` stage span, so a trace
+/// shows which scripts (AI managers, unit behaviours, ...) the stage's time
+/// goes to, tick by tick. A separate feature from `tracy` because it costs
+/// a lookup per fork and resume. Profiling never reads into sim state.
+#[cfg(feature = "lua-profile")]
+pub mod profile {
+    use std::collections::HashMap;
+    use std::rc::Rc;
+
+    use mlua::prelude::*;
+
+    /// Where a live thread's function was defined.
+    struct Origin {
+        /// `file:line`, the zone name.
+        name: Rc<str>,
+        file: Rc<str>,
+        line: u32,
+    }
+
+    /// Live threads' origins, by coroutine pointer.
+    #[derive(Default)]
+    pub struct ThreadOrigins(HashMap<usize, Origin>);
+
+    /// Records where a newly forked thread's function was defined.
+    pub fn forked(lua: &Lua, f: &LuaFunction, thread: &LuaThread) {
+        if lua.app_data_ref::<ThreadOrigins>().is_none() {
+            lua.set_app_data(ThreadOrigins::default());
+        }
+        let i = f.info();
+        let file: Rc<str> = Rc::from(i.source.as_deref().unwrap_or("?"));
+        let line = i.line_defined.unwrap_or(0) as u32;
+        let origin = Origin { name: Rc::from(format!("{file}:{line}")), file, line };
+        lua.app_data_mut::<ThreadOrigins>().unwrap().0.insert(thread.to_pointer() as usize, origin);
+    }
+
+    /// Forgets a killed thread's origin.
+    pub fn killed(lua: &Lua, thread: &LuaThread) {
+        if let Some(mut o) = lua.app_data_mut::<ThreadOrigins>() {
+            o.0.remove(&(thread.to_pointer() as usize));
+        }
+    }
+
+    /// Runs `resume` inside a Tracy zone named by the thread's origin. The
+    /// origins aren't borrowed while Lua runs.
+    pub fn zoned<R>(lua: &Lua, thread: &LuaThread, resume: impl FnOnce() -> R) -> R {
+        let Some(client) = tracy_client::Client::running() else { return resume() };
+        let key = thread.to_pointer() as usize;
+        let zone = match lua.app_data_ref::<ThreadOrigins>().and_then(|o| o.0.get(&key).map(|o| (o.name.clone(), o.file.clone(), o.line))) {
+            Some((name, file, line)) => client.span_alloc(Some(&name), "lua thread", &file, line, 0),
+            None => client.span_alloc(Some("lua thread (unknown origin)"), "lua thread", "?", 0, 0),
+        };
+        let result = resume();
+        drop(zone);
+        if thread.status() != LuaThreadStatus::Resumable {
+            killed(lua, thread);
+        }
+        result
+    }
+}
+
+pub fn register(lua: &Lua) -> LuaResult<()> {
+    if lua.app_data_ref::<Scheduler>().is_none() {
+        lua.set_app_data(Scheduler::default());
+    }
+    let globals = lua.globals();
+    let coroutine: LuaTable = globals.get("coroutine")?;
+    let close: LuaFunction = coroutine.get("close")?;
+
+    lua_fn!(lua, global,
+        /// Runs `f(...)` as a new thread, starting at the next scheduling
+        /// point; returns the thread.
+        ForkThread = |lua, (f, args): (LuaFunction, LuaMultiValue)| {
+            #[cfg(feature = "lua-profile")]
+            let thread = {
+                let thread = lua.create_thread(f.clone())?;
+                profile::forked(lua, &f, &thread);
+                thread
+            };
+            #[cfg(not(feature = "lua-profile"))]
+            let thread = lua.create_thread(f)?;
+            lua.app_data_mut::<Scheduler>()
+                .expect("Scheduler not in app_data")
+                .fork(thread.clone(), args);
+            Ok(thread)
+        })?;
+    lua_fn!(lua, global,
+        /// Kills a thread. `KillThread(nil)` is a no-op: FAF kills threads
+        /// that may never have started (uel0307's shield thread).
+        KillThread = move |lua, thread: Option<LuaThread>| {
+            let Some(thread) = thread else { return Ok(()) };
+            lua.app_data_mut::<Scheduler>()
+                .expect("Scheduler not in app_data")
+                .kill(&thread);
+            #[cfg(feature = "lua-profile")]
+            profile::killed(lua, &thread);
+            // Free the coroutine's stack now. A running thread can't be closed;
+            // it is simply never resumed again once it yields.
+            if thread.status() != LuaThreadStatus::Running {
+                let _ = close.call::<LuaMultiValue>(thread);
+            }
+            Ok(())
+        })?;
+    // A native function can't yield, so the suspend is a Luau wrapper: mark
+    // the running task suspended, then yield it.
+    let mark = lua.create_function(|lua, thread: LuaThread| {
+        lua.app_data_mut::<Scheduler>().expect("Scheduler not in app_data").suspend(&thread);
+        Ok(())
+    })?;
+    let suspend: LuaFunction = lua
+        .load("local mark, running, yield = ... return function() mark(running()) return yield() end")
+        .set_name("=[engine SuspendCurrentThread]")
+        .call((mark, coroutine.get::<LuaFunction>("running")?, coroutine.get::<LuaFunction>("yield")?))?;
+    globals.set("SuspendCurrentThread", suspend)?;
+    // `coroutine.running()` returns the main thread outside a coroutine;
+    // moho returns nil there.
+    let current: LuaFunction = lua
+        .load("local running, isyieldable = ... return function() if isyieldable() then return running() end return nil end")
+        .set_name("=[engine CurrentThread]")
+        .call((coroutine.get::<LuaFunction>("running")?, coroutine.get::<LuaFunction>("isyieldable")?))?;
+    globals.set("CurrentThread", current)?;
+    // The two Luau wrappers above are not native functions (a native function
+    // can't yield); they are recorded here so they appear in the API.
+    for (name, doc) in [
+        ("SuspendCurrentThread", "Suspends the running thread until `ResumeThread` wakes it."),
+        ("CurrentThread", "The running thread, or nil outside a coroutine (moho's behaviour; `coroutine.running()` returns the main thread there)."),
+    ] {
+        crate::lua_api::registry::record(lua, FnEntry { scope: Scope::Global, name: name.into(), params: Some(&[]), args: <() as LuaArgs>::types, rets: <LuaMultiValue as LuaArgs>::types, doc, status: Status::Implemented });
+    }
+    lua_fn!(lua, global,
+        /// Wakes a thread suspended by `SuspendCurrentThread` (a no-op if it
+        /// isn't suspended).
+        ResumeThread = |lua, thread: LuaThread| {
+            lua.app_data_mut::<Scheduler>().expect("Scheduler not in app_data").resume_suspended(&thread);
+            Ok(())
+        })?;
+    Ok(())
+}
+
+/// Starts a tick and runs its Lua threads ([`run_due`]): the interface's
+/// frames, which have no sim tick around them.
+pub fn run_tick(lua: &Lua) -> LuaResult<()> {
+    lua.app_data_mut::<Scheduler>().expect("Scheduler not in app_data").begin_tick();
+    run_due(lua)
+}
+
+/// Runs the Lua threads of the tick under way (the sim tick's threads
+/// stage; `Scheduler::begin_tick` started it): tasks due this tick (by wake
+/// tick, then creation order), then every pending fork in FIFO order,
+/// including forks created while draining.
+pub fn run_due(lua: &Lua) -> LuaResult<()> {
+    let due = lua
+        .app_data_mut::<Scheduler>()
+        .expect("Scheduler not in app_data")
+        .take_due();
+    // After each resume, platoons that thread emptied (AI managers move
+    // units between platoons from their threads) end before any other
+    // thread runs, so their own threads are killed instead of waking to a
+    // platoon with no units; never while a thread is running.
+    for id in due {
+        resume(lua, id)?;
+        crate::engine::api::entity::end_emptied_platoons(lua)?;
+    }
+    loop {
+        let next = lua
+            .app_data_mut::<Scheduler>()
+            .expect("Scheduler not in app_data")
+            .next_pending();
+        match next {
+            Some(id) => {
+                resume(lua, id)?;
+                crate::engine::api::entity::end_emptied_platoons(lua)?;
+            }
+            None => return Ok(()),
+        }
+    }
+}
+
+fn resume(lua: &Lua, id: TaskId) -> LuaResult<()> {
+    let _s = crate::prof_span!("lua thread resume");
+    // Never hold the scheduler borrow while Lua runs: the thread may call
+    // ForkThread/KillThread.
+    let Some((thread, args)) = lua
+        .app_data_mut::<Scheduler>()
+        .expect("Scheduler not in app_data")
+        .begin_resume(id)
+    else {
+        return Ok(());
+    };
+    #[cfg(feature = "lua-profile")]
+    let result = profile::zoned(lua, &thread, || thread.resume::<LuaMultiValue>(args));
+    #[cfg(not(feature = "lua-profile"))]
+    let result = thread.resume::<LuaMultiValue>(args);
+    let outcome = match result {
+        Ok(values) => match thread.status() {
+            LuaThreadStatus::Resumable => {
+                let value = match values.front() {
+                    Some(LuaValue::Integer(n)) => Some(*n as f64),
+                    Some(LuaValue::Number(n)) => Some(*n),
+                    _ => None,
+                };
+                lua.app_data_ref::<Scheduler>().expect("Scheduler not in app_data").wait(value)
+            }
+            _ => ResumeOutcome::Finished,
+        },
+        Err(e) => {
+            tracing::warn!(target: "lua", "thread error: {}", crate::lua_api::errors::Explained(lua, &e));
+            ResumeOutcome::Finished
+        }
+    };
+    lua.app_data_mut::<Scheduler>()
+        .expect("Scheduler not in app_data")
+        .end_resume(id, outcome);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fork_wait_and_kill_ordering() {
+        let lua = Lua::new();
+        register(&lua).unwrap();
+        lua.load(
+            "log = {}
+             ForkThread(function(tag)
+                 table.insert(log, tag .. '1')
+                 coroutine.yield(2)
+                 table.insert(log, tag .. '2')
+             end, 'a')
+             victim = ForkThread(function() coroutine.yield(1) table.insert(log, 'never') end)
+             ForkThread(function()
+                 table.insert(log, 'b1')
+                 KillThread(victim)
+                 ForkThread(function() table.insert(log, 'child') end)
+             end)",
+        )
+        .exec()
+        .unwrap();
+        for _ in 0..4 {
+            run_tick(&lua).unwrap();
+        }
+        let log: String = lua.load("return table.concat(log, ',')").eval().unwrap();
+        // Tick 1: a1, victim yields, b1 kills victim and forks child (same tick).
+        // Tick 3: a resumes after WaitTicks(2).
+        assert_eq!(log, "a1,b1,child,a2");
+        assert_eq!(lua.app_data_ref::<Scheduler>().unwrap().task_count(), 0);
+    }
+
+    #[test]
+    fn suspend_until_resumed() {
+        let lua = Lua::new();
+        register(&lua).unwrap();
+        lua.load(
+            "log = {}
+             sleeper = ForkThread(function()
+                 table.insert(log, 'sleep')
+                 SuspendCurrentThread()
+                 table.insert(log, 'woke')
+             end)
+             ResumeThread(sleeper) -- not suspended yet: no-op",
+        )
+        .exec()
+        .unwrap();
+        for _ in 0..5 {
+            run_tick(&lua).unwrap();
+        }
+        assert_eq!(lua.load("return table.concat(log, ',')").eval::<String>().unwrap(), "sleep");
+        lua.load("ResumeThread(sleeper)").exec().unwrap();
+        run_tick(&lua).unwrap();
+        assert_eq!(lua.load("return table.concat(log, ',')").eval::<String>().unwrap(), "sleep,woke");
+    }
+}

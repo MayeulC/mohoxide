@@ -1,0 +1,32 @@
+# cargo-about (dev/package/third-party-licenses.sh): the third-party licence
+# notices shipped with the packaged program. Preference order: where a crate
+# offers a choice, the first listed here is the one we take.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "Zlib",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "BSL-1.0",
+    "Unlicense",
+    "0BSD",
+    "MIT-0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "bzip2-1.0.6",
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+    "MPL-2.0",
+]
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+]
+private = { ignore = true }
+ignore-build-dependencies = true
+ignore-dev-dependencies = true

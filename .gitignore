@@ -1,0 +1,31 @@
+/target
+dev/probes/out/
+.DS_Store
+*.tracy
+__pycache__/
+tests/golden/images/*.actual.png
+/dist
+.claude
+/replays
+
+# Generated Lua API types (`cargo run -- --dump-api docs/api`)
+/docs/api/
+
+# Local VFS listing dump
+/vfs_dump.txt
+
+# The engine's log (and numbered ones from extra sessions)
+/game*.log
+
+# Tracy captures and log folders from long runs
+/traces/
+/logs/
+
+# Ad-hoc outputs in the repo root (--screenshot, --audio-dump)
+/*.png
+/*.wav
+
+# Editor and OS noise
+*.swp
+*~
+Thumbs.db
